@@ -71,7 +71,9 @@ V3.12-slim
 IMAGE                                                                          ID             DISK USAGE   CONTENT SIZE   EXTRA
 ghcr.io/josgam0294-plabs/api-tareas:7acde46b6ddb32d101680f28c3412ee5324e3145   3806e162aea4        188MB         45.5MB        
 
+IMAGE ID DISK USAGE CONTENT SIZE EXTRA
 
+ghcr.io/josgam0294-plabs/api-tareas:89d4b4445535dadef86529ec8e7aa6996da06ba7 acb0e3e4ad91 1.61GB 414MB
 
 ### Docker Ignore
 .git = Evitar incluir configuraciones de git en el paquete
@@ -88,3 +90,5 @@ reportes = No es necesario para construir la imagen en Docker
 tests = No es necesario para construir la imagen en Docker
 docs = No es necesario para construir la imagen en Docker
 .env = En caso de haber nombrado venv al ambiente virtual mismo principio del .venv
+
+## Despliegue y rollback
