@@ -90,3 +90,5 @@ reportes = No es necesario para construir la imagen en Docker
 tests = No es necesario para construir la imagen en Docker
 docs = No es necesario para construir la imagen en Docker
 .env = En caso de haber nombrado venv al ambiente virtual mismo principio del .venv
+
+## Despliegue y rollback
