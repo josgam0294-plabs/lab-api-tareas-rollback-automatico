@@ -1,37 +1,49 @@
 name: CI/CD
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
-  
+    inputs:
+      version_rota:
+        description: "Demo: desplegar una versión que no arranca en producción"
+        type: boolean
+        default: false
+
 jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
-    - uses: actions/setup-python@v7
-      with:
-        python-version: "3.12"
-        cache: pip
-        cache-dependency-path: requirements*.txt
-    - name: Instalar dependencias
-      run: python -m pip install -r requirements-dev.txt
-    - name: Validar (build)
-      run: |
-        python -m compileall -q app
-        python -c "from app import create_app; create_app()"
-    - name: Pruebas
-      run: bash scripts/pruebas.sh
-    - name: Publicar reporte de pruebas
-      if: always()
-      uses: actions/upload-artifact@v7
-      with:
-        name: reporte-pruebas
-        path: reportes/
-        if-no-files-found: error  
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Instalar dependencias
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Validar (build)
+        run: |
+          python -m compileall -q app
+          python -c "from app import create_app; create_app()"
+
+      - name: Pruebas
+        run: bash scripts/pruebas.sh
+
+      - name: Publicar reporte de pruebas
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reporte-pruebas
+          path: reportes/
+          if-no-files-found: error
+
   empaquetar:
     name: Empaquetar imagen
     needs: ci
@@ -44,14 +56,28 @@ jobs:
       imagen: ${{ steps.nombre.outputs.imagen }}
     steps:
       - uses: actions/checkout@v7
+
       - name: Calcular nombre de la imagen
         id: nombre
+        env:
+          ROTA: ${{ inputs.version_rota }}
         # GHCR exige minúsculas; ${VAR,,} las convierte en Bash.
-        run: echo "imagen=ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+        # La versión rota de la demo lleva otra etiqueta: nunca pisa la imagen buena de un SHA.
+        run: |
+          ETIQUETA="$GITHUB_SHA"
+          if [ "$ROTA" = "true" ]; then ETIQUETA="rota-$GITHUB_RUN_ID"; fi
+          echo "imagen=ghcr.io/${GITHUB_REPOSITORY,,}:$ETIQUETA" >> "$GITHUB_OUTPUT"
+
+      - name: "Solo para la demo: romper la versión"
+        if: inputs.version_rota
+        # La API deja de arrancar en producción si no tiene API_TOKEN (y producción no lo tiene).
+        run: git apply demo/version_rota.patch && git diff
+
       - name: Iniciar sesión en GHCR
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
       - name: Construir imagen
         env:
           IMAGEN: ${{ steps.nombre.outputs.imagen }}
@@ -62,10 +88,12 @@ jobs:
             --label org.opencontainers.image.revision="$GITHUB_SHA" \
             -t "$IMAGEN" .
           docker image ls "$IMAGEN"
+
       - name: Publicar imagen
         env:
           IMAGEN: ${{ steps.nombre.outputs.imagen }}
-        run: docker push "$IMAGEN"    
+        run: docker push "$IMAGEN"
+
   staging:
     name: Desplegar en staging
     needs: empaquetar
@@ -73,16 +101,20 @@ jobs:
     environment: staging
     steps:
       - uses: actions/checkout@v7
+
       - name: Iniciar sesión en GHCR
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
       - name: Desplegar contenedor
         env:
           IMAGEN: ${{ needs.empaquetar.outputs.imagen }}
         run: docker run -d --name api -p 8080:8000 -e APP_ENV=staging "$IMAGEN"
+
       - name: Smoke test
         run: bash scripts/smoke.sh http://localhost:8080
+
   produccion:
     name: Desplegar en producción
     needs: [empaquetar, staging]
@@ -91,13 +123,55 @@ jobs:
     environment: produccion
     steps:
       - uses: actions/checkout@v7
+
       - name: Iniciar sesión en GHCR
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
       - name: Desplegar contenedor
         env:
           IMAGEN: ${{ needs.empaquetar.outputs.imagen }}
         run: docker run -d --name api -p 8080:8000 -e APP_ENV=produccion "$IMAGEN"
+
       - name: Smoke test
         run: bash scripts/smoke.sh http://localhost:8080
+
+  rollback:
+    name: Rollback automático en producción
+    needs: produccion
+    environment: produccion
+    # Solo si falló producción. Si falló antes (por ejemplo staging), producción nunca cambió.
+    if: failure() && needs.produccion.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Buscar el último SHA que pasó producción
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA=$(gh run list --workflow ci-cd.yml --branch main --status success \
+                --limit 1 --json headSha --jq '.[0].headSha')
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "No hay una versión buena anterior"; exit 1; }
+          echo "Se vuelve a $SHA"
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+          echo "IMAGEN=ghcr.io/${GITHUB_REPOSITORY,,}:$SHA" >> "$GITHUB_ENV"
+
+      - name: Iniciar sesión en GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Desplegar la versión anterior
+        run: docker run -d --name api -p 8080:8000 -e APP_ENV=produccion "$IMAGEN"
+
+      - name: Smoke test
+        run: |
+          bash scripts/smoke.sh http://localhost:8080
+          curl -fsS http://localhost:8080/version | grep -q "$SHA"
+          echo "OK producción volvió a $SHA"
